@@ -1,55 +1,107 @@
-import lxml.etree as ET
+"""Separate TCX activities into a destination folder by sport type."""
+
+from __future__ import annotations
+
+import argparse
 import shutil
-import os
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
-# Delete the contents of the folder before re-running the script
-try:
-    folder_path = '/content/Moved'
-    shutil.rmtree(folder_path)
-    print('Folder and its content removed')
-except:
-    print('Folder not deleted')
-
-# Function to clean the XML content in the event there are any unwanted characters or whitespaces preceding the xml declaration
-def clean_xml_content(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        content = file.read()
-    # Remove any unwanted characters or whitespace before the XML declaration
-    cleaned_content = content.lstrip()
-    return cleaned_content
+TCX_NAMESPACE = {"ns": "http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"}
 
 
-# Directory containing the .tcx files
-source_dir = "/content"
-destination_dir = '/content/Moved'
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Copy TCX files for a chosen sport into a destination folder."
+    )
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=Path.cwd(),
+        help="Folder that contains TCX files. Default: current directory.",
+    )
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        default=Path("Moved"),
+        help="Folder that will receive matching files. Default: Moved.",
+    )
+    parser.add_argument(
+        "--sport",
+        default="Ride",
+        help="TCX sport name to match. Default: Ride.",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Search the source folder recursively for TCX files.",
+    )
+    parser.add_argument(
+        "--clear-destination",
+        action="store_true",
+        help="Remove the destination folder before copying files.",
+    )
+    return parser.parse_args()
 
-# Ensure the destination directory exists
-os.makedirs(destination_dir, exist_ok=True)
 
-# Define the XML namespace
-namespace = {'ns': 'http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2'}
+def read_activity_sport(file_path: Path) -> str | None:
+    try:
+        raw_text = file_path.read_text(encoding="utf-8")
+        root = ET.fromstring(raw_text.lstrip())
+    except (UnicodeDecodeError, ET.ParseError, OSError) as exc:
+        print(f"[skip] {file_path.name}: could not parse TCX ({exc})")
+        return None
 
-# Iterate over all .tcx files in the source directory
-for file_name in os.listdir(source_dir):
-    if file_name.endswith('.tcx'):
-        file_path = os.path.join(source_dir, file_name)
+    activity = root.find(".//ns:Activity", namespaces=TCX_NAMESPACE)
+    if activity is None:
+        return None
+    return activity.get("Sport")
 
-        # Clean the XML content
-        cleaned_content = clean_xml_content(file_path)
-        # Parse the cleaned XML content
-        root = ET.fromstring(cleaned_content.encode('utf-8'))
 
-        # Find the activity type
-        activity = root.find('.//ns:Activity', namespaces=namespace)
-        activity_type = activity.get('Sport') if activity is not None else 'Unknown'
+def iter_tcx_files(source: Path, recursive: bool, destination: Path) -> list[Path]:
+    if recursive:
+        files = []
+        for path in source.rglob("*.tcx"):
+            if destination in path.parents:
+                continue
+            files.append(path)
+        return files
+    return [path for path in source.glob("*.tcx") if destination not in path.parents]
 
-        # Check if the activity type is 'Ride' and save a copy if true
-        if activity_type == 'Ride':
-            # Define the destination file path
-            destination_path = os.path.join(destination_dir, file_name)
 
-            # Copy the file to the destination directory
-            shutil.copy(file_path, destination_path)
-            print(f"File copied to {destination_path}")
+def main() -> int:
+    args = parse_args()
+    source = args.source.resolve()
+    destination = args.destination.resolve()
+
+    if not source.exists() or not source.is_dir():
+        print(f"[error] Source folder not found: {source}")
+        return 1
+
+    if args.clear_destination and destination.exists():
+        shutil.rmtree(destination)
+
+    destination.mkdir(parents=True, exist_ok=True)
+
+    matched = 0
+    scanned = 0
+    for file_path in sorted(iter_tcx_files(source, args.recursive, destination)):
+        scanned += 1
+        sport = read_activity_sport(file_path)
+        if sport == args.sport:
+            target = destination / file_path.name
+            shutil.copy2(file_path, target)
+            matched += 1
+            print(f"[copy] {file_path.name} -> {target}")
         else:
-            print(f"The activity type is not 'Ride' for file {file_path}. No file copied.")
+            print(f"[skip] {file_path.name}: sport={sport or 'Unknown'}")
+
+    print(
+        f"Completed. Scanned {scanned} TCX file(s); copied {matched} {args.sport} file(s) to {destination}."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
